@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SLBL Landslide Failure Surface Prediction Demo</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f0f0f0; }
+        #canvas-container { width: 100%; height: 100vh; }
+        #ui-panel {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            width: 340px;
+            background: rgba(255, 255, 255, 0.9);
+            color: #333;
+            padding: 20px;
+            border-radius: 10px;
+            border: 1px solid #ccc;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+            backdrop-filter: blur(5px);
+        }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; font-size: 12px; color: #666; margin-bottom: 5px; }
+        button {
+            width: 100%;
+            padding: 10px;
+            border: none;
+            border-radius: 5px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: 0.2s;
+            margin-bottom: 5px;
+        }
+        .btn-primary { background: #3b82f6; color: white; }
+        .btn-primary:hover { background: #2563eb; }
+        .btn-danger { background: #ef4444; color: white; }
+        .btn-danger:hover { background: #dc2626; }
+        
+        .status-indicator {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 10px;
+            font-size: 13px;
+            border-top: 1px solid #eee;
+            padding-top: 10px;
+        }
+        .legend {
+            margin-top: 15px;
+            display: flex;
+            height: 10px;
+            width: 100%;
+            border-radius: 5px;
+            background: linear-gradient(to right, #4ade80, #facc15, #ef4444);
+        }
+        .legend-labels {
+            display: flex;
+            justify-content: space-between;
+            font-size: 10px;
+            color: #666;
+            margin-top: 4px;
+        }
+        .math-var { font-family: 'Times New Roman', serif; font-style: italic; }
+    </style>
+</head>
+<body>
+
+<div id="canvas-container"></div>
+
+<div id="ui-panel">
+    <h2 class="text-xl font-bold mb-2 text-blue-600">SLBL Failure Prediction</h2>
+    <p class="text-xs text-gray-600 mb-4">
+        Based on Jaboyedoff et al. algorithm.
+        <br>Equation: <span class="math-var">Z<sub>new</sub> = Avg(Z<sub>neighbors</sub>) - C</span>
+        <br>Constraint: <span class="math-var">Z<sub>new</sub> &le; Z<sub>old</sub></span> (Failure Surface)
+    </p>
+
+    <div class="control-group">
+        <label>Controls</label>
+        <button id="btn-start" class="btn-primary">Start SLBL Iteration</button>
+        <button id="btn-reset" class="btn-danger">Reset Terrain</button>
+    </div>
+
+    <div class="control-group">
+        <label>Max Depth (<span class="math-var">zmax</span>) : <span id="zmax-val" class="font-bold">15</span> m</label>
+        <input type="range" id="zmax-slider" min="5" max="30" value="15" step="1" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer">
+    </div>
+
+    <div class="control-group">
+        <label>Iteration Speed</label>
+        <input type="range" id="speed-slider" min="1" max="20" value="5" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer">
+    </div>
+
+    <div class="status-indicator">
+        <div class="flex flex-col">
+            <span>Iter: <span id="iter-count" class="text-blue-600 font-mono font-bold">0</span></span>
+            <span class="text-xs text-gray-500">Curvature C ≈ <span id="c-val">0.00</span></span>
+        </div>
+        <span>Status: <span id="status-text" class="text-green-600 font-bold">Ready</span></span>
+    </div>
+
+    <div class="mt-4">
+        <label>Failure Depth Legend</label>
+        <div class="legend"></div>
+        <div class="legend-labels">
+            <span>0m</span>
+            <span>zmax</span>
+        </div>
+    </div>
+    
+    <div class="mt-4 text-xs text-gray-500 border-t border-gray-200 pt-2">
+        <p><b>Algorithm Logic:</b></p>
+        <ul class="list-disc pl-4 space-y-1">
+            <li>Curvature term C included.</li>
+            <li>Unidirectional evolution (Digging only).</li>
+            <li>Simulating Failure Surface.</li>
+        </ul>
+    </div>
+</div>
+
+<script>
+    // ------------------------------------------------------------------
+    // 1. Scene Initialization
+    // ------------------------------------------------------------------
+    const container = document.getElementById('canvas-container');
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0xffffff);
+    // Fog settings: start 200, end 1000
+    scene.fog = new THREE.Fog(0xffffff, 200, 1000);
+
+    const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 2000);
+    camera.position.set(70, 50, 80);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.shadowMap.enabled = true;
+    container.appendChild(renderer.domElement);
+
+    const controls = new THREE.OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.05;
+    controls.maxPolarAngle = Math.PI / 2;
+
+    // ------------------------------------------------------------------
+    // 2. Lighting
+    // ------------------------------------------------------------------
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
+    scene.add(ambientLight);
+
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.6);
+    dirLight.position.set(50, 100, 50);
+    // dirLight.castShadow = true; // Shadows disabled
+    scene.add(dirLight);
+
+    // ------------------------------------------------------------------
+    // 3. Terrain & Algorithm Params
+    // ------------------------------------------------------------------
+    const GRID_SIZE = 100; // Physical size (m)
+    const GRID_SEGMENTS = 100; // Grid resolution
+    const GRID_SPACING = GRID_SIZE / GRID_SEGMENTS; // h
+    const SLOPE_ANGLE = Math.PI / 6; // 30 degrees
+    
+    // Slide region (Ellipse)
+    const RADIUS_X = 30;
+    const RADIUS_Z = 35;
+    const SLIDE_L = 2 * Math.max(RADIUS_X, RADIUS_Z); // L: Characteristic length
+    
+    let terrainGeometry, wireframeMesh, slblMesh;
+    let originalPositions = null;
+    let activeRegionIndices = []; 
+    let isSimulating = false;
+    let iterationCount = 0;
+    let simulationSpeed = 5;
+    
+    // SLBL Core Params
+    let paramZmax = 15;
+    let paramC = 0; // Curvature factor
+
+    // ------------------------------------------------------------------
+    // 4. Create Terrain
+    // ------------------------------------------------------------------
+    
+    function createTerrain() {
+        if(wireframeMesh) scene.remove(wireframeMesh);
+        if(slblMesh) scene.remove(slblMesh);
+
+        iterationCount = 0;
+        document.getElementById('iter-count').innerText = 0;
+
+        terrainGeometry = new THREE.PlaneGeometry(GRID_SIZE, GRID_SIZE, GRID_SEGMENTS, GRID_SEGMENTS);
+        terrainGeometry.rotateX(-Math.PI / 2);
+
+        const positions = terrainGeometry.attributes.position.array;
+        const count = positions.length / 3;
+        originalPositions = new Float32Array(count);
+
+        for (let i = 0; i < count; i++) {
+            const x = positions[i * 3];
+            const z = positions[i * 3 + 2];
+            
+            // Base slope + Noise
+            let height = (z + GRID_SIZE/2) * Math.tan(SLOPE_ANGLE);
+            const noise = Math.sin(x * 0.1) * 2 + Math.cos(z * 0.15) * 2;
+            height += noise;
+
+            positions[i * 3 + 1] = height;
+            originalPositions[i] = height; // Save original terrain (Z_before)
+        }
+
+        terrainGeometry.computeVertexNormals();
+
+        // Original Terrain Wireframe
+        const wireframeMat = new THREE.MeshBasicMaterial({
+            color: 0x333333, // Darker color for contrast
+            wireframe: true,
+            transparent: true,
+            opacity: 0.15
+        });
+        wireframeMesh = new THREE.Mesh(terrainGeometry.clone(), wireframeMat);
+        scene.add(wireframeMesh);
+
+        // SLBL Evolving Surface
+        const colors = [];
+        for (let i = 0; i < count; i++) {
+            colors.push(0.29, 0.87, 0.5);
+        }
+        terrainGeometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+
+        const slblMat = new THREE.MeshStandardMaterial({
+            vertexColors: true,
+            roughness: 0.8,
+            metalness: 0.1,
+            side: THREE.DoubleSide,
+            polygonOffset: true,
+            polygonOffsetFactor: 1,
+            polygonOffsetUnits: 1
+        });
+        slblMesh = new THREE.Mesh(terrainGeometry, slblMat);
+        // slblMesh.castShadow = true; 
+        // slblMesh.receiveShadow = true;
+        scene.add(slblMesh);
+
+        // Define Slide Region
+        activeRegionIndices = [];
+        const centerX = 0;
+        const centerZ = 5;
+
+        for (let i = 0; i < count; i++) {
+            const px = positions[i * 3];
+            const pz = positions[i * 3 + 2];
+            
+            const dist = (Math.pow(px - centerX, 2) / Math.pow(RADIUS_X, 2)) + 
+                         (Math.pow(pz - centerZ, 2) / Math.pow(RADIUS_Z, 2));
+            
+            // Exclude boundary points to keep edges fixed
+            if (dist <= 1.0 && dist < 0.95) {
+                activeRegionIndices.push(i);
+            }
+        }
+
+        updateCalculatedParams();
+    }
+
+    // Update Param C
+    function updateCalculatedParams() {
+        // Formula: C = 4 * (zmax / L^2) * h^2
+        const h = GRID_SPACING;
+        const L = SLIDE_L;
+        paramC = 4 * (paramZmax / (L * L)) * (h * h);
+        
+        document.getElementById('c-val').innerText = paramC.toFixed(5);
+    }
+
+    // ------------------------------------------------------------------
+    // 5. SLBL Algorithm (Failure Surface Prediction)
+    // ------------------------------------------------------------------
+    
+    function iterateSLBL() {
+        if (!isSimulating) return;
+
+        const positions = slblMesh.geometry.attributes.position.array;
+        const colors = slblMesh.geometry.attributes.color.array;
+        const widthSeg = GRID_SEGMENTS + 1;
+
+        // Simulation Speed
+        const iterationsPerFrame = Math.max(1, Math.floor(simulationSpeed)); 
+
+        for (let k = 0; k < iterationsPerFrame; k++) {
+            
+            // Gauss-Seidel iteration in place
+            let maxDiff = 0;
+
+            for (let idx of activeRegionIndices) {
+                // Grid indices
+                const r = Math.floor(idx / widthSeg);
+                const c = idx % widthSeg;
+
+                // 4-Neighbor Indices
+                const idx_up = (r - 1) * widthSeg + c;
+                const idx_down = (r + 1) * widthSeg + c;
+                const idx_left = r * widthSeg + (c - 1);
+                const idx_right = r * widthSeg + (c + 1);
+
+                // Heights
+                const h_up = positions[idx_up * 3 + 1];
+                const h_down = positions[idx_down * 3 + 1];
+                const h_left = positions[idx_left * 3 + 1];
+                const h_right = positions[idx_right * 3 + 1];
+                const h_current = positions[idx * 3 + 1];
+
+                // SLBL Equation:
+                // Z_temp = Average(Neighbors) - C
+                const avgHeight = (h_up + h_down + h_left + h_right) * 0.25;
+                const z_temp = avgHeight - paramC;
+
+                // Constraint: Failure Surface can only dig down
+                let newHeight = z_temp;
+                if (newHeight > h_current) {
+                    newHeight = h_current;
+                }
+
+                // Update
+                positions[idx * 3 + 1] = newHeight;
+                
+                const diff = Math.abs(newHeight - h_current);
+                if (diff > maxDiff) maxDiff = diff;
+            }
+
+            iterationCount++;
+
+            // Convergence check
+            if (maxDiff < 1e-4) {
+                isSimulating = false;
+                updateUIState(false);
+                document.getElementById('status-text').innerText = "Converged";
+                break;
+            }
+        }
+
+        updateHeatmap(positions, colors);
+
+        slblMesh.geometry.attributes.position.needsUpdate = true;
+        slblMesh.geometry.attributes.color.needsUpdate = true;
+        slblMesh.geometry.computeVertexNormals();
+
+        document.getElementById('iter-count').innerText = iterationCount;
+    }
+
+    function updateHeatmap(positions, colors) {
+        for (let i of activeRegionIndices) {
+            const originalH = originalPositions[i];
+            const currentH = positions[i * 3 + 1];
+            const depth = originalH - currentH;
+
+            // Visualization
+            let t = Math.min(depth / paramZmax, 1.0); 
+
+            // Green -> Yellow -> Red
+            let r, g, b;
+            if (t < 0.5) {
+                // Green to Yellow
+                const tt = t * 2;
+                r = 0.29 + (0.98 - 0.29) * tt;
+                g = 0.87 + (0.80 - 0.87) * tt;
+                b = 0.50 + (0.09 - 0.50) * tt;
+            } else {
+                // Yellow to Red
+                const tt = (t - 0.5) * 2;
+                r = 0.98 + (0.93 - 0.98) * tt;
+                g = 0.80 + (0.26 - 0.80) * tt;
+                b = 0.09 + (0.26 - 0.09) * tt;
+            }
+
+            colors[i * 3] = r;
+            colors[i * 3 + 1] = g;
+            colors[i * 3 + 2] = b;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 6. UI Interaction
+    // ------------------------------------------------------------------
+    
+    const btnStart = document.getElementById('btn-start');
+    const btnReset = document.getElementById('btn-reset');
+    const statusText = document.getElementById('status-text');
+    const zmaxSlider = document.getElementById('zmax-slider');
+    const zmaxVal = document.getElementById('zmax-val');
+    const speedSlider = document.getElementById('speed-slider');
+
+    function updateUIState(simulating) {
+        if (simulating) {
+            btnStart.innerText = "Pause";
+            btnStart.classList.remove('btn-primary');
+            btnStart.classList.add('bg-yellow-500', 'hover:bg-yellow-600', 'text-white');
+            statusText.innerText = "Calculating...";
+            statusText.className = "text-yellow-600 font-bold animate-pulse";
+        } else {
+            btnStart.innerText = "Resume";
+            btnStart.className = "btn-primary";
+        }
+    }
+
+    btnStart.addEventListener('click', () => {
+        isSimulating = !isSimulating;
+        updateUIState(isSimulating);
+        if (!isSimulating) {
+             statusText.innerText = "Paused";
+             statusText.className = "text-gray-800 font-bold";
+        }
+    });
+
+    btnReset.addEventListener('click', () => {
+        isSimulating = false;
+        createTerrain();
+        updateUIState(false);
+        btnStart.innerText = "Start SLBL Iteration";
+        statusText.innerText = "Reset";
+        statusText.className = "text-green-600 font-bold";
+    });
+
+    zmaxSlider.addEventListener('input', (e) => {
+        paramZmax = parseFloat(e.target.value);
+        zmaxVal.innerText = paramZmax;
+        updateCalculatedParams();
+    });
+    
+    speedSlider.addEventListener('input', (e) => {
+        simulationSpeed = parseInt(e.target.value);
+    });
+
+    // ------------------------------------------------------------------
+    // 7. Loop
+    // ------------------------------------------------------------------
+    
+    // Axes & Grid
+    const axesHelper = new THREE.AxesHelper(10);
+    axesHelper.position.set(-GRID_SIZE/2, 0, -GRID_SIZE/2);
+    scene.add(axesHelper);
+
+    const gridHelper = new THREE.GridHelper(200, 50, 0xcccccc, 0xeeeeee);
+    gridHelper.position.y = -30;
+    scene.add(gridHelper);
+
+    function animate() {
+        requestAnimationFrame(animate);
+        if (isSimulating) iterateSLBL();
+        controls.update();
+        renderer.render(scene, camera);
+    }
+
+    window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    // Start
+    createTerrain();
+    animate();
+
+</script>
+</body>
+</html>
